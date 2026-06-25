@@ -8,6 +8,15 @@ import { createServerClient } from "@supabase/ssr";
 export async function middleware(request: NextRequest) {
   let response = NextResponse.next({ request });
 
+  // Demo mode: if Supabase isn't configured, skip auth entirely so the app
+  // runs with zero backend setup (e.g. a one-click Vercel deploy).
+  const supabaseConfigured =
+    !!process.env.NEXT_PUBLIC_SUPABASE_URL?.startsWith("https://") &&
+    !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!supabaseConfigured) {
+    return response;
+  }
+
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -35,10 +44,7 @@ export async function middleware(request: NextRequest) {
   const isPublic =
     pathname === "/" || pathname.startsWith("/login") || pathname.startsWith("/auth");
 
-  // Only enforce auth when Supabase is actually configured (keeps local dev easy).
-  const supabaseConfigured = !!process.env.NEXT_PUBLIC_SUPABASE_URL?.startsWith("https://");
-
-  if (supabaseConfigured && !user && !isPublic && !pathname.startsWith("/api")) {
+  if (!user && !isPublic && !pathname.startsWith("/api")) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);

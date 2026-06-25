@@ -49,7 +49,36 @@
 
 ---
 
-## 🚀 Quick Start
+## ⚡ Go live for free (easiest path)
+
+The app runs in **demo mode with zero backend** — deploy it to Vercel's free tier
+with **no environment variables** and it works immediately (sample data, AI uses
+the built-in deterministic fallback). Add Supabase + OpenAI later to make it real.
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/rachmatafriy/p-5hc)
+
+1. Click the button (or **vercel.com → Add New → Project → import this repo**).
+2. **Deploy** — leave all env vars blank. Done: live at `https://<your-app>.vercel.app`.
+
+> The build runs `prisma generate` automatically. No database is required for the
+> demo; pages fall back to sample data and the rule-based meal/risk engines.
+
+### Turn demo into production (still free)
+
+1. Create a free **Supabase** project → enable the `vector` & `uuid-ossp` extensions.
+2. In Vercel **Settings → Environment Variables**, add `DATABASE_URL`, `DIRECT_URL`,
+   `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+   `SUPABASE_SERVICE_ROLE_KEY` (and `OPENAI_API_KEY` if you want real AI).
+3. From your machine, apply the schema once:
+   ```bash
+   DATABASE_URL=... DIRECT_URL=... npx prisma migrate deploy
+   psql "$DIRECT_URL" -f supabase/migrations/0001_extensions_and_rls.sql
+   ```
+4. Redeploy. Auth + real persistence now active. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+---
+
+## 🚀 Quick Start (local)
 
 ### 1. Prerequisites
 
