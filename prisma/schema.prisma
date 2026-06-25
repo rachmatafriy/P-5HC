@@ -1,0 +1,659 @@
+// =============================================================================
+// PDHRS — Personal Digital Health Recovery System
+// Prisma schema. Models the full domain: identity/RBAC, MCU, recovery,
+// nutrition, fitness, occupational health, surveillance, AI artifacts, audit.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Identity & RBAC
+// -----------------------------------------------------------------------------
+
+enum Role {
+  USER // self-service personal user
+  CLINICIAN // occupational physician / nurse
+  HSE // health, safety & environment officer
+  ADMIN // org administrator
+  AUDITOR // read-only ISO 45001 auditor
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  industry  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users User[]
+  sites Site[]
+
+  @@map("organizations")
+}
+
+model Site {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @db.Uuid
+  name           String
+  location       String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users        User[]
+
+  @@index([organizationId])
+  @@map("sites")
+}
+
+/// Mirrors a Supabase auth.users row (id == auth uid).
+model User {
+  id             String   @id @db.Uuid
+  email          String   @unique
+  fullName       String?
+  role           Role     @default(USER)
+  organizationId String?  @db.Uuid
+  siteId         String?  @db.Uuid
+  jobTitle       String?
+  department     String?
+  employeeId     String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  site         Site?         @relation(fields: [siteId], references: [id])
+
+  profile             HealthProfile?
+  mcuRecords          McuRecord[]
+  recoveryPlans       RecoveryPlan[]
+  weeklyCheckins      WeeklyCheckin[]
+  mealPlans           MealPlan[]
+  groceryLists        GroceryList[]
+  workoutPlans        WorkoutPlan[]
+  waterLogs           WaterLog[]
+  sleepLogs           SleepLog[]
+  medications         Medication[]
+  reminders           Reminder[]
+  documents           MedicalDocument[]
+  surveillanceRecords SurveillanceRecord[]
+  fitnessForWork      FitnessForWork[]
+  healthIndexes       HealthIndexSnapshot[]
+  aiInteractions      AiInteraction[]
+  auditLogs           AuditLog[]
+
+  @@index([organizationId])
+  @@index([role])
+  @@map("users")
+}
+
+model HealthProfile {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @unique @db.Uuid
+  dateOfBirth     DateTime? @db.Date
+  gender          Gender?
+  heightCm        Float?
+  baselineWeight  Float?
+  bloodType       String?
+  smoker          Boolean   @default(false)
+  alcoholUnits    Int       @default(0) // per week
+  activityLevel   String? // sedentary | light | moderate | active | athlete
+  targetWeight    Float?
+  targetHealthIdx Int?      @default(85)
+  chronicDisease  String[]  @default([])
+  allergies       String[]  @default([])
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("health_profiles")
+}
+
+// -----------------------------------------------------------------------------
+// MCU (Medical Check Up) & biomarkers
+// -----------------------------------------------------------------------------
+
+enum McuVerdict {
+  FIT
+  FIT_WITH_NOTE
+  FIT_WITH_RESTRICTION
+  TEMPORARILY_UNFIT
+  UNFIT
+}
+
+model McuRecord {
+  id          String     @id @default(uuid()) @db.Uuid
+  userId      String     @db.Uuid
+  examDate    DateTime   @db.Date
+  provider    String?
+  verdict     McuVerdict @default(FIT)
+  notes       String?    @db.Text
+  // Anthropometry
+  weightKg    Float?
+  heightCm    Float?
+  waistCm     Float?
+  systolicBp  Int?
+  diastolicBp Int?
+  heartRate   Int?
+  // Labs
+  fastingGlucose Float? // mg/dL
+  hba1c          Float? // %
+  totalChol      Float? // mg/dL
+  ldl            Float?
+  hdl            Float?
+  triglycerides  Float?
+  uricAcid       Float? // mg/dL
+  ast            Float? // SGOT U/L
+  alt            Float? // SGPT U/L
+  creatinine     Float?
+  egfr           Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  riskAssessment RiskAssessment?
+  recoveryPlans RecoveryPlan[]
+
+  @@index([userId, examDate])
+  @@map("mcu_records")
+}
+
+/// Computed (deterministic) risk scores derived from an MCU record.
+model RiskAssessment {
+  id                 String   @id @default(uuid()) @db.Uuid
+  mcuRecordId        String   @unique @db.Uuid
+  bmi                Float?
+  bmiCategory        String?
+  waistRisk          String?
+  cardiovascularRisk Float? // 10-yr % (Framingham-style)
+  metabolicRisk      String?
+  fattyLiverRisk     String?
+  hyperuricemiaRisk  String?
+  diabetesRisk       Float? // % (FINDRISC-style mapping)
+  healthIndex        Int? // 0-100
+  biologicalAge      Float?
+  lifeExpectancy     Float?
+  recoveryForecast   Json? // {weeks, etaDate, trajectory[]}
+  computedAt         DateTime @default(now())
+
+  mcuRecord McuRecord @relation(fields: [mcuRecordId], references: [id], onDelete: Cascade)
+
+  @@map("risk_assessments")
+}
+
+// -----------------------------------------------------------------------------
+// Recovery & monitoring
+// -----------------------------------------------------------------------------
+
+enum PlanStatus {
+  ACTIVE
+  COMPLETED
+  PAUSED
+  CANCELLED
+}
+
+model RecoveryPlan {
+  id           String     @id @default(uuid()) @db.Uuid
+  userId       String     @db.Uuid
+  mcuRecordId  String?    @db.Uuid
+  title        String
+  objective    String?    @db.Text
+  startDate    DateTime   @db.Date
+  targetDate   DateTime?  @db.Date
+  status       PlanStatus @default(ACTIVE)
+  targetWeight Float?
+  targetIndex  Int?
+  progressPct  Float      @default(0)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mcuRecord McuRecord? @relation(fields: [mcuRecordId], references: [id])
+  goals     RecoveryGoal[]
+
+  @@index([userId, status])
+  @@map("recovery_plans")
+}
+
+model RecoveryGoal {
+  id          String   @id @default(uuid()) @db.Uuid
+  planId      String   @db.Uuid
+  metric      String // weight | ldl | hba1c | uricAcid | systolicBp ...
+  baseline    Float?
+  target      Float?
+  current     Float?
+  unit        String?
+  achieved    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  plan RecoveryPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([planId])
+  @@map("recovery_goals")
+}
+
+model WeeklyCheckin {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  weekStart   DateTime @db.Date
+  weightKg    Float?
+  waistCm     Float?
+  systolicBp  Int?
+  diastolicBp Int?
+  energyScore Int? // 1-10
+  moodScore   Int? // 1-10
+  adherence   Float? // 0-100 %
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, weekStart])
+  @@index([userId])
+  @@map("weekly_checkins")
+}
+
+// -----------------------------------------------------------------------------
+// Nutrition: meals, grocery, prep
+// -----------------------------------------------------------------------------
+
+enum MealType {
+  BREAKFAST
+  LUNCH
+  DINNER
+  SNACK
+}
+
+model MealPlan {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  weekStart DateTime @db.Date
+  title     String?
+  kcalTarget Int?
+  generatedByAi Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  meals       Meal[]
+  groceryList GroceryList?
+
+  @@index([userId, weekStart])
+  @@map("meal_plans")
+}
+
+model Meal {
+  id         String   @id @default(uuid()) @db.Uuid
+  mealPlanId String   @db.Uuid
+  dayIndex   Int // 0..6
+  type       MealType
+  name       String
+  recipe     String?  @db.Text
+  // Nutrition facts per serving
+  kcal       Float    @default(0)
+  proteinG   Float    @default(0)
+  carbG      Float    @default(0)
+  fatG       Float    @default(0)
+  fiberG     Float    @default(0)
+  sugarG     Float    @default(0)
+  purineMg   Float    @default(0)
+  sodiumMg   Float    @default(0)
+  potassiumMg Float   @default(0)
+
+  mealPlan MealPlan @relation(fields: [mealPlanId], references: [id], onDelete: Cascade)
+
+  @@index([mealPlanId, dayIndex])
+  @@map("meals")
+}
+
+model GroceryList {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  mealPlanId String?  @unique @db.Uuid
+  title      String?
+  createdAt  DateTime @default(now())
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mealPlan MealPlan?     @relation(fields: [mealPlanId], references: [id])
+  items    GroceryItem[]
+
+  @@index([userId])
+  @@map("grocery_lists")
+}
+
+model GroceryItem {
+  id            String  @id @default(uuid()) @db.Uuid
+  groceryListId String  @db.Uuid
+  name          String
+  quantity      Float?
+  unit          String?
+  category      String? // produce | protein | dairy | pantry ...
+  purchased     Boolean @default(false)
+
+  groceryList GroceryList @relation(fields: [groceryListId], references: [id], onDelete: Cascade)
+
+  @@index([groceryListId])
+  @@map("grocery_items")
+}
+
+// -----------------------------------------------------------------------------
+// Fitness
+// -----------------------------------------------------------------------------
+
+enum WorkoutType {
+  GYM
+  WALKING
+  CARDIO
+  MOBILITY
+  STRETCHING
+  RECOVERY
+}
+
+model WorkoutPlan {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  weekStart DateTime @db.Date
+  title     String?
+  generatedByAi Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessions Workout[]
+
+  @@index([userId, weekStart])
+  @@map("workout_plans")
+}
+
+model Workout {
+  id            String      @id @default(uuid()) @db.Uuid
+  workoutPlanId String      @db.Uuid
+  dayIndex      Int
+  type          WorkoutType
+  name          String
+  durationMin   Int?
+  intensity     String? // low | moderate | high
+  caloriesBurn  Int?
+  details       String?     @db.Text
+  completed     Boolean     @default(false)
+
+  workoutPlan WorkoutPlan @relation(fields: [workoutPlanId], references: [id], onDelete: Cascade)
+
+  @@index([workoutPlanId, dayIndex])
+  @@map("workouts")
+}
+
+// -----------------------------------------------------------------------------
+// Daily trackers
+// -----------------------------------------------------------------------------
+
+model WaterLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  date      DateTime @db.Date
+  amountMl  Int
+  goalMl    Int      @default(2500)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@map("water_logs")
+}
+
+model SleepLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  date        DateTime @db.Date
+  hours       Float
+  qualityScore Int? // 1-10
+  bedtime     String?
+  wakeTime    String?
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@map("sleep_logs")
+}
+
+model Medication {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  name       String
+  dosage     String?
+  frequency  String? // e.g. "2x/day"
+  times      String[] @default([]) // ["08:00","20:00"]
+  startDate  DateTime @db.Date
+  endDate    DateTime? @db.Date
+  active     Boolean  @default(true)
+  notes      String?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reminders Reminder[]
+
+  @@index([userId, active])
+  @@map("medications")
+}
+
+// -----------------------------------------------------------------------------
+// Reminders
+// -----------------------------------------------------------------------------
+
+enum ReminderType {
+  MEDICINE
+  EXERCISE
+  WATER
+  SLEEP
+  DOCTOR
+  LABORATORY
+  MCU
+}
+
+model Reminder {
+  id           String       @id @default(uuid()) @db.Uuid
+  userId       String       @db.Uuid
+  medicationId String?      @db.Uuid
+  type         ReminderType
+  title        String
+  scheduledAt  DateTime
+  recurrence   String? // RRULE-like string
+  done         Boolean      @default(false)
+  createdAt    DateTime     @default(now())
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  medication Medication? @relation(fields: [medicationId], references: [id])
+
+  @@index([userId, scheduledAt])
+  @@map("reminders")
+}
+
+// -----------------------------------------------------------------------------
+// Medical documents (Supabase Storage references)
+// -----------------------------------------------------------------------------
+
+model MedicalDocument {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  title       String
+  category    String? // mcu | lab | prescription | imaging | certificate
+  storagePath String // path within Supabase Storage bucket
+  mimeType    String?
+  sizeBytes   Int?
+  docDate     DateTime? @db.Date
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, category])
+  @@map("medical_documents")
+}
+
+// -----------------------------------------------------------------------------
+// Occupational Health: surveillance & fitness for work
+// -----------------------------------------------------------------------------
+
+enum SurveillanceType {
+  AUDIOMETRY
+  SPIROMETRY
+  VISION
+  BIOLOGICAL_MONITORING
+  VACCINATION
+  FATIGUE
+}
+
+model SurveillanceRecord {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  type      SurveillanceType
+  examDate  DateTime         @db.Date
+  result    String? // normal | abnormal | borderline
+  data      Json? // type-specific structured results
+  nextDue   DateTime?        @db.Date
+  notes     String?          @db.Text
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@map("surveillance_records")
+}
+
+enum FfwClass {
+  P1 // fit, no restriction
+  P2 // fit with minor note
+  P3 // fit with restriction
+  P4 // temporarily unfit
+  P5 // permanently unfit
+}
+
+model FitnessForWork {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  assessDate  DateTime  @db.Date
+  classification FfwClass
+  restriction String?   @db.Text
+  validUntil  DateTime? @db.Date
+  assessor    String?
+  returnToWork Boolean  @default(false)
+  notes       String?   @db.Text
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, assessDate])
+  @@map("fitness_for_work")
+}
+
+// -----------------------------------------------------------------------------
+// Health Index snapshots (trend/forecast source of truth)
+// -----------------------------------------------------------------------------
+
+model HealthIndexSnapshot {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  date        DateTime @db.Date
+  score       Int // 0-100
+  recoveryPct Float? // 0-100
+  components  Json? // {cardio, metabolic, liver, lifestyle...}
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId, date])
+  @@map("health_index_snapshots")
+}
+
+// -----------------------------------------------------------------------------
+// AI artifacts
+// -----------------------------------------------------------------------------
+
+enum AiAgent {
+  HEALTH_COACH
+  NUTRITIONIST
+  OCCUPATIONAL_PHYSICIAN
+  RISK_ASSESSOR
+}
+
+enum AiArtifactKind {
+  MORNING_PLAN
+  EVENING_REVIEW
+  WEEKLY_REPORT
+  MONTHLY_REPORT
+  CHAT
+  RECOMMENDATION
+}
+
+model AiInteraction {
+  id        String         @id @default(uuid()) @db.Uuid
+  userId    String         @db.Uuid
+  agent     AiAgent
+  kind      AiArtifactKind
+  prompt    String?        @db.Text
+  response  String         @db.Text
+  model     String?
+  tokensIn  Int?
+  tokensOut Int?
+  metadata  Json?
+  createdAt DateTime       @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, agent, createdAt])
+  @@map("ai_interactions")
+}
+
+/// RAG knowledge base chunks with pgvector embeddings.
+/// NOTE: the `embedding vector(1536)` column is added via raw SQL migration
+/// because Prisma does not yet have a native vector type.
+model KnowledgeChunk {
+  id        String   @id @default(uuid()) @db.Uuid
+  source    String
+  title     String?
+  content   String   @db.Text
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@map("knowledge_chunks")
+}
+
+// -----------------------------------------------------------------------------
+// Audit trail (ISO 45001 / security)
+// -----------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String?  @db.Uuid
+  action     String // CREATE | UPDATE | DELETE | LOGIN | EXPORT | VIEW
+  entity     String
+  entityId   String?
+  before     Json?
+  after      Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
